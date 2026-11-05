@@ -1,0 +1,16 @@
+import time
+from PIE625 import PIE625
+
+z_stage = PIE625()
+
+try:
+    print("Start voltage:", z_stage.get_voltage())
+
+    z_stage.set_relative_voltage(-7)
+
+    time.sleep(1)
+
+    print("New voltage:", z_stage.get_voltage())
+
+finally:
+    z_stage.close()

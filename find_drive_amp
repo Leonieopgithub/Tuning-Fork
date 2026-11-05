@@ -1,0 +1,519 @@
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+
+from SR830 import SR830
+from Rigol import Rigol
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+START_FREQ = 797.0
+STOP_FREQ = 803.0
+STEP = 0.05
+
+WAIT_TIME = 0.5
+
+DRIVE_AMPLITUDE = 0.05     # SR830 sine out [V]
+NOISE_SAMPLES = 30
+NOISE_WAIT_TIME = 0.1
+
+NORMAL_SR830_SN = "A9JSTXTQA"
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def find_zero_crossing(frequencies, phases):
+    """
+    Find the frequency where the phase crosses 0 degrees.
+    Linear interpolation is used between the two surrounding points.
+    """
+
+    for i in range(len(phases) - 1):
+
+        phase1 = phases[i]
+        phase2 = phases[i + 1]
+
+        # Check if zero lies between these two measurements
+        if phase1 == 0:
+            return frequencies[i]
+
+        if phase1 * phase2 < 0:
+
+            f1 = frequencies[i]
+            f2 = frequencies[i + 1]
+
+            # Linear interpolation to phase = 0
+            f_zero = f1 + (
+                (0 - phase1)
+                * (f2 - f1)
+                / (phase2 - phase1)
+            )
+
+            return f_zero
+
+    return None
+
+
+def interpolate_crossing(f1, a1, f2, a2, target):
+    """
+    Linear interpolation to find frequency
+    where amplitude crosses 'target'.
+    """
+
+    if a2 == a1:
+        return (f1 + f2) / 2
+
+    return f1 + (
+        (target - a1)
+        * (f2 - f1)
+        / (a2 - a1)
+    )
+
+
+def calculate_q(
+    frequencies,
+    amplitudes,
+    f0,
+    noise_mean
+):
+    """
+    Estimate Q using the -3 dB bandwidth.
+
+    The mean drive-off signal is first removed
+    as an approximate background.
+    """
+
+    corrected_amplitudes = amplitudes - noise_mean
+
+    # Prevent negative values after background subtraction
+    corrected_amplitudes = np.maximum(
+        corrected_amplitudes,
+        0
+    )
+
+    peak_index = np.argmax(corrected_amplitudes)
+    peak_amplitude = corrected_amplitudes[peak_index]
+
+    # -3 dB / half-power amplitude
+    half_power_amplitude = (
+        peak_amplitude / np.sqrt(2)
+    )
+
+    f_left = None
+    f_right = None
+
+    # Search left of peak
+    for i in range(peak_index - 1, -1, -1):
+
+        if (
+            corrected_amplitudes[i]
+            <= half_power_amplitude
+            <= corrected_amplitudes[i + 1]
+        ):
+            f_left = interpolate_crossing(
+                frequencies[i],
+                corrected_amplitudes[i],
+                frequencies[i + 1],
+                corrected_amplitudes[i + 1],
+                half_power_amplitude
+            )
+            break
+
+    # Search right of peak
+    for i in range(
+        peak_index,
+        len(corrected_amplitudes) - 1
+    ):
+
+        if (
+            corrected_amplitudes[i]
+            >= half_power_amplitude
+            >= corrected_amplitudes[i + 1]
+        ):
+            f_right = interpolate_crossing(
+                frequencies[i],
+                corrected_amplitudes[i],
+                frequencies[i + 1],
+                corrected_amplitudes[i + 1],
+                half_power_amplitude
+            )
+            break
+
+    # Cannot determine Q if one crossing is outside sweep
+    if f_left is None or f_right is None:
+        return None, f_left, f_right
+
+    bandwidth = f_right - f_left
+
+    if bandwidth <= 0:
+        return None, f_left, f_right
+
+    q_factor = f0 / bandwidth
+
+    return q_factor, f_left, f_right
+
+
+# ============================================================
+# CONNECT DEVICES
+# ============================================================
+
+print("Connecting to normal SR830...")
+lockin = SR830(
+    serial_number=NORMAL_SR830_SN
+)
+
+print("Connecting to Rigol...")
+rigol = Rigol()
+
+
+rigol.set_waveform(1, "SIN")
+rigol.set_output(1, True)
+
+lockin.set_sine_out_amplitude(
+    DRIVE_AMPLITUDE
+)
+
+
+frequencies = np.arange(
+    START_FREQ,
+    STOP_FREQ + STEP / 2,
+    STEP
+)
+
+
+measured_frequencies = []
+measured_amplitudes = []
+measured_phases = []
+
+noise_measurements = []
+
+
+# ============================================================
+# FREQUENCY SWEEP
+# ============================================================
+
+print(
+    f"\nStarting sweep with "
+    f"{DRIVE_AMPLITUDE:.3f} V drive...\n"
+)
+
+
+try:
+
+    for frequency in frequencies:
+
+        rigol.set_frequency(
+            1,
+            frequency
+        )
+
+        time.sleep(WAIT_TIME)
+
+        amplitude = lockin.read_amplitude()
+        phase = lockin.read_phase()
+
+        measured_frequencies.append(
+            frequency
+        )
+
+        measured_amplitudes.append(
+            amplitude
+        )
+
+        measured_phases.append(
+            phase
+        )
+
+        print(
+            f"f={frequency:.1f} Hz | "
+            f"A={amplitude:.9f} V | "
+            f"phase={phase:.3f}°"
+        )
+
+
+    # ========================================================
+    # NOISE MEASUREMENT
+    # ========================================================
+
+    print("\nMeasuring noise with drive OFF...")
+
+    # Stop mechanical excitation
+    lockin.set_sine_out_amplitude(0.0)
+
+    # Rigol remains ON so SR830 still has its reference
+
+    time.sleep(1.0)
+
+    for i in range(NOISE_SAMPLES):
+
+        amplitude = lockin.read_amplitude()
+
+        noise_measurements.append(
+            amplitude
+        )
+
+        time.sleep(NOISE_WAIT_TIME)
+
+
+finally:
+
+    # Safe shutdown
+    lockin.set_sine_out_amplitude(0.0)
+    rigol.set_output(1, False)
+
+    lockin.close()
+    rigol.close()
+
+    print("\nSweep finished.")
+    print("SR830 sine out = 0 V")
+    print("Rigol CH1 output = OFF")
+
+
+# ============================================================
+# CONVERT TO NUMPY
+# ============================================================
+
+measured_frequencies = np.array(
+    measured_frequencies
+)
+
+measured_amplitudes = np.array(
+    measured_amplitudes
+)
+
+measured_phases = np.array(
+    measured_phases
+)
+
+noise_measurements = np.array(
+    noise_measurements
+)
+
+
+# ============================================================
+# CALCULATE RESULTS
+# ============================================================
+
+# Peak amplitude
+peak_index = np.argmax(
+    measured_amplitudes
+)
+
+peak_amplitude = measured_amplitudes[
+    peak_index
+]
+
+peak_frequency = measured_frequencies[
+    peak_index
+]
+
+
+# Resonance from phase = 0 crossing
+f0 = find_zero_crossing(
+    measured_frequencies,
+    measured_phases
+)
+
+
+# Noise
+noise_mean = np.mean(
+    noise_measurements
+)
+
+noise_std = np.std(
+    noise_measurements,
+    ddof=1
+)
+
+
+# Signal-to-noise ratio
+signal_above_background = (
+    peak_amplitude - noise_mean
+)
+
+if noise_std > 0:
+
+    snr = (
+        signal_above_background
+        / noise_std
+    )
+
+else:
+    snr = np.inf
+
+
+# Q factor
+if f0 is not None:
+
+    q_factor, f_left, f_right = calculate_q(
+        measured_frequencies,
+        measured_amplitudes,
+        f0,
+        noise_mean
+    )
+
+else:
+
+    q_factor = None
+    f_left = None
+    f_right = None
+
+
+# ============================================================
+# PRINT RESULTS
+# ============================================================
+
+print("\n" + "=" * 50)
+print("RESULTS")
+print("=" * 50)
+
+print(
+    f"Drive amplitude: "
+    f"{DRIVE_AMPLITUDE:.3f} V"
+)
+
+print(
+    f"Peak amplitude: "
+    f"{peak_amplitude:.6f} V"
+)
+
+print(
+    f"Frequency of maximum amplitude: "
+    f"{peak_frequency:.3f} Hz"
+)
+
+if f0 is not None:
+
+    print(
+        f"Resonance frequency from phase: "
+        f"{f0:.3f} Hz"
+    )
+
+else:
+
+    print(
+        "Resonance frequency: "
+        "no phase zero-crossing found"
+    )
+
+
+print(
+    f"Noise mean: "
+    f"{noise_mean:.9f} V"
+)
+
+print(
+    f"Noise standard deviation: "
+    f"{noise_std:.9f} V"
+)
+
+print(
+    f"SNR: {snr:.1f}"
+)
+
+
+if q_factor is not None:
+
+    print(
+        f"-3 dB frequencies: "
+        f"{f_left:.3f} Hz and "
+        f"{f_right:.3f} Hz"
+    )
+
+    print(
+        f"Bandwidth Δf: "
+        f"{f_right - f_left:.3f} Hz"
+    )
+
+    print(
+        f"Q factor: "
+        f"{q_factor:.1f}"
+    )
+
+else:
+
+    print(
+        "Q factor could not be determined."
+    )
+
+    print(
+        "The sweep may not contain both "
+        "-3 dB points."
+    )
+
+
+print("=" * 50)
+
+
+# ============================================================
+# AMPLITUDE PLOT
+# ============================================================
+
+plt.figure()
+
+plt.plot(
+    measured_frequencies,
+    measured_amplitudes,
+    marker="."
+)
+
+if f0 is not None:
+
+    plt.axvline(
+        f0,
+        linestyle="--",
+        label=f"f0 = {f0:.2f} Hz"
+    )
+
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Amplitude (V)")
+plt.title(
+    f"Frequency response - "
+    f"drive = {DRIVE_AMPLITUDE:.3f} V"
+)
+
+plt.grid(True)
+plt.legend()
+
+
+# ============================================================
+# PHASE PLOT
+# ============================================================
+
+plt.figure()
+
+plt.plot(
+    measured_frequencies,
+    measured_phases,
+    marker="."
+)
+
+plt.axhline(
+    0,
+    linestyle="--"
+)
+
+if f0 is not None:
+
+    plt.axvline(
+        f0,
+        linestyle="--",
+        label=f"f0 = {f0:.2f} Hz"
+    )
+
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Phase (degrees)")
+plt.title(
+    f"Phase response - "
+    f"drive = {DRIVE_AMPLITUDE:.3f} V"
+)
+
+plt.grid(True)
+plt.legend()
+
+plt.show()

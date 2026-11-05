@@ -1,0 +1,101 @@
+import time
+import numpy as np
+from SR830 import SR830
+from Rigol import Rigol
+import matplotlib.pyplot as plt
+
+
+
+START_FREQ = 780.0
+STOP_FREQ = 820.0
+STEP = 0.1
+
+WAIT_TIME = 0.5
+
+NORMAL_SR830_SN = "A9JSTXTQA"
+
+print("Connecting to normal SR830...")
+lockin = SR830(serial_number=NORMAL_SR830_SN)
+
+print("Connecting to Rigol...")
+rigol = Rigol()
+
+rigol.set_waveform(1, "SIN")
+rigol.set_output(1, True)
+
+lockin.set_sine_out_amplitude(0.03)
+
+frequencies = np.arange(
+    START_FREQ,
+    STOP_FREQ + STEP,
+    STEP
+)
+
+
+print("\nStarting sweep...\n")
+
+
+try:
+    measured_frequencies = []
+    measured_amplitudes = []
+    measured_phases = []
+
+    for frequency in frequencies:
+
+        rigol.set_frequency(1, frequency)
+
+        time.sleep(WAIT_TIME)
+
+        amplitude = lockin.read_amplitude()
+        phase = lockin.read_phase()
+
+        measured_frequencies.append(frequency)
+        measured_amplitudes.append(amplitude)
+        measured_phases.append(phase)
+
+        print(
+            f"f={frequency:.1f} Hz | "
+            f"A={amplitude:.9f} V | "
+            f"phase={phase:.3f}°"
+        )
+
+
+finally:
+
+    lockin.set_sine_out_amplitude(0.0)
+    rigol.set_output(1, False)
+
+    lockin.close()
+    rigol.close()
+
+    print("\nSweep finished.")
+    print("SR830 sine out = 0 V")
+    print("Rigol CH1 output = OFF")
+
+    plt.figure()
+
+plt.plot(
+    measured_frequencies,
+    measured_amplitudes,
+    marker="."
+)
+
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Amplitude (V)")
+plt.title("Normal tuning fork frequency response")
+plt.grid(True)
+
+plt.figure()
+
+plt.plot(
+    measured_frequencies,
+    measured_phases,
+    marker="."
+)
+
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Phase (degrees)")
+plt.title("Normal tuning fork phase response")
+plt.grid(True)
+
+plt.show()
